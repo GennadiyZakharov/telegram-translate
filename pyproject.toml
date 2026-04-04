@@ -1,0 +1,9 @@
+[project]
+name = "telegram-translate"
+version = "0.1.0"
+description = "Translate HTML Telegram chat history with a local Ollama model while preserving HTML structure"
+requires-python = ">=3.12"
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "requests>=2.31",
+]
