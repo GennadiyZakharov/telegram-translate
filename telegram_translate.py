@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -36,44 +35,6 @@ class MessageItem:
     text: str
     leading_ws: str
     trailing_ws: str
-
-
-class TranslationCache:
-    def __init__(self, db_path: Path):
-        self.conn = sqlite3.connect(db_path)
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS translations (
-                source_text TEXT PRIMARY KEY,
-                translated_text TEXT NOT NULL,
-                created_at REAL NOT NULL
-            )
-            """
-        )
-        self.conn.commit()
-
-    def get(self, text: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT translated_text FROM translations WHERE source_text = ?", (text,)
-        ).fetchone()
-        return row[0] if row else None
-
-    def set_many(self, items: Iterable[tuple[str, str]]) -> None:
-        now = time.time()
-        self.conn.executemany(
-            """
-            INSERT INTO translations(source_text, translated_text, created_at)
-            VALUES(?, ?, ?)
-            ON CONFLICT(source_text) DO UPDATE SET
-                translated_text = excluded.translated_text,
-                created_at = excluded.created_at
-            """,
-            [(src, dst, now) for src, dst in items],
-        )
-        self.conn.commit()
-
-    def close(self) -> None:
-        self.conn.close()
 
 
 class OllamaTranslator:
@@ -209,7 +170,6 @@ def translate_html_file(
     input_path: Path,
     output_path: Path,
     translator: OllamaTranslator,
-    cache: TranslationCache,
     batch_size: int,
     force_all: bool,
     overwrite: bool,
@@ -220,7 +180,6 @@ def translate_html_file(
             "output": str(output_path),
             "status": "skipped_existing",
             "translated_blocks": 0,
-            "cached_blocks": 0,
         }
 
     html = input_path.read_text(encoding="utf-8")
@@ -229,7 +188,6 @@ def translate_html_file(
     divs = list(iter_message_divs(soup))
     candidates: list[tuple[object, MessageItem]] = []
     translated_blocks = 0
-    cached_blocks = 0
 
     for idx, div in enumerate(divs):
         raw_text = div.get_text(separator="", strip=False)
@@ -249,20 +207,10 @@ def translate_html_file(
             )
         )
 
-    pending: list[tuple[object, MessageItem]] = []
-    for div, item in candidates:
-        cached = cache.get(item.text)
-        if cached is not None:
-            replace_div_text(div, f"{item.leading_ws}{cached}{item.trailing_ws}")
-            cached_blocks += 1
-        else:
-            pending.append((div, item))
-
-    for i in range(0, len(pending), batch_size):
-        batch = pending[i : i + batch_size]
+    for i in range(0, len(candidates), batch_size):
+        batch = candidates[i : i + batch_size]
         src_texts = [item.text for _, item in batch]
         translated = translator.translate_batch(src_texts)
-        cache.set_many(zip(src_texts, translated))
         for (div, item), out_text in zip(batch, translated):
             replace_div_text(div, f"{item.leading_ws}{out_text}{item.trailing_ws}")
             translated_blocks += 1
@@ -275,7 +223,6 @@ def translate_html_file(
         "output": str(output_path),
         "status": "ok",
         "translated_blocks": translated_blocks,
-        "cached_blocks": cached_blocks,
     }
 
 
@@ -293,15 +240,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("output", type=Path, help="Output HTML file or directory")
     parser.add_argument("--model", default="translategemma:latest", help="Ollama model name")
     parser.add_argument("--api-url", default=OLLAMA_DEFAULT_URL, help="Ollama /api/chat URL")
-    parser.add_argument("--batch-size", type=int, default=4, help="Messages per LLM request")
-    parser.add_argument("--timeout", type=int, default=300, help="HTTP timeout in seconds")
+    parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
+    parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
     parser.add_argument("--keep-alive", default="10m", help="Ollama keep_alive value")
-    parser.add_argument(
-        "--cache-db",
-        type=Path,
-        default=Path("translation_cache.sqlite3"),
-        help="SQLite cache path",
-    )
     parser.add_argument(
         "--force-all",
         action="store_true",
@@ -345,32 +286,25 @@ def main() -> int:
     )
     translator.preload()
 
-    cache = TranslationCache(args.cache_db)
     overall_translated = 0
-    overall_cached = 0
 
-    try:
-        for file_path in files:
-            target = map_output_path(input_path, output_path, file_path)
-            result = translate_html_file(
-                input_path=file_path,
-                output_path=target,
-                translator=translator,
-                cache=cache,
-                batch_size=args.batch_size,
-                force_all=args.force_all,
-                overwrite=args.overwrite,
-            )
-            overall_translated += result["translated_blocks"]
-            overall_cached += result["cached_blocks"]
-            print(
-                f"[{result['status']}] {result['file']} -> {result['output']} | "
-                f"translated={result['translated_blocks']} cached={result['cached_blocks']}"
-            )
-    finally:
-        cache.close()
+    for file_path in files:
+        target = map_output_path(input_path, output_path, file_path)
+        result = translate_html_file(
+            input_path=file_path,
+            output_path=target,
+            translator=translator,
+            batch_size=args.batch_size,
+            force_all=args.force_all,
+            overwrite=args.overwrite,
+        )
+        overall_translated += result["translated_blocks"]
+        print(
+            f"[{result['status']}] {result['file']} -> {result['output']} | "
+            f"translated={result['translated_blocks']}"
+        )
 
-    print(f"Done. Newly translated blocks: {overall_translated}. Cache hits: {overall_cached}.")
+    print(f"Done. Translated blocks: {overall_translated}.")
     return 0
 
 

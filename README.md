@@ -49,12 +49,12 @@ source .venv/bin/activate
 Translate one file:
 
 ```bash
-python translate_messenger_html.py chat.html translated_chat.html
+python telegram_translate.py chat.html translated_chat.html
 ```
 
 Translate a whole directory recursively:
 ```bash
-python translate_messenger_html.py ./export_html ./translated_html --overwrite
+python telegram_translate.py ./export_html ./translated_html --overwrite
 ```
 
 ## Useful options
