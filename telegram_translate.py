@@ -13,7 +13,7 @@ from typing import Iterable, List
 import requests
 from bs4 import BeautifulSoup
 
-OLLAMA_DEFAULT_URL = "http://localhost:11434/api/chat"
+LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 DEFAULT_SYSTEM_PROMPT = """You are a careful literary translator.
 Translate Russian chat messages into natural, fluent English.
 Rules:
@@ -37,34 +37,22 @@ class MessageItem:
     trailing_ws: str
 
 
-class OllamaTranslator:
+class LlamaCppTranslator:
     def __init__(
         self,
         model: str,
-        api_url: str = OLLAMA_DEFAULT_URL,
+        api_url: str = LLAMA_CPP_DEFAULT_URL,
         timeout: int = 300,
-        keep_alive: str = "10m",
         temperature: float = 0.0,
         retries: int = 3,
+        debug: bool = False,
     ):
         self.model = model
         self.api_url = api_url
         self.timeout = timeout
-        self.keep_alive = keep_alive
         self.temperature = temperature
         self.retries = retries
-
-    def preload(self) -> None:
-        payload = {
-            "model": self.model,
-            "messages": [],
-            "stream": False,
-            "keep_alive": self.keep_alive,
-        }
-        try:
-            requests.post(self.api_url, json=payload, timeout=30)
-        except requests.RequestException:
-            pass
+        self.debug = debug
 
     def translate_batch(self, texts: List[str]) -> List[str]:
         schema = {
@@ -99,9 +87,11 @@ class OllamaTranslator:
         payload = {
             "model": self.model,
             "stream": False,
-            "keep_alive": self.keep_alive,
-            "format": schema,
-            "options": {"temperature": self.temperature},
+            "temperature": self.temperature,
+            "response_format": {
+                "type": "json_object",
+                "schema": schema,
+            },
             "messages": [
                 {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -112,11 +102,14 @@ class OllamaTranslator:
         for attempt in range(1, self.retries + 1):
             try:
                 print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
-                print(f"Messages:\n{texts}")
+                if self.debug:
+                    print(f"Request payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
                 response = requests.post(self.api_url, json=payload, timeout=self.timeout)
                 response.raise_for_status()
                 data = response.json()
-                content = data["message"]["content"]
+                content = data["choices"][0]["message"]["content"]
+                if self.debug:
+                    print(f"Model response:\n{content}")
                 parsed = json.loads(content)
                 items = parsed["translations"]
                 result = [None] * len(texts)
@@ -127,9 +120,8 @@ class OllamaTranslator:
                     result[idx] = item["translated_text"]
                 if any(v is None for v in result):
                     raise ValueError("Model returned an incomplete translation batch")
-                print(f"Translation complete:\n{result}")
                 return result  # type: ignore[return-value]
-            except (requests.RequestException, KeyError, ValueError, json.JSONDecodeError) as exc:
+            except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt == self.retries:
                     break
@@ -169,7 +161,7 @@ def replace_div_text(div, new_text: str) -> None:
 def translate_html_file(
     input_path: Path,
     output_path: Path,
-    translator: OllamaTranslator,
+    translator: LlamaCppTranslator,
     batch_size: int,
     force_all: bool,
     overwrite: bool,
@@ -234,15 +226,14 @@ def discover_html_files(input_path: Path) -> list[Path]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Translate Messenger-exported HTML files from Russian to English using a local Ollama model."
+        description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server."
     )
     parser.add_argument("input", type=Path, help="Input HTML file or directory")
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
-    parser.add_argument("--model", default="translategemma:latest", help="Ollama model name")
-    parser.add_argument("--api-url", default=OLLAMA_DEFAULT_URL, help="Ollama /api/chat URL")
-    parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
+    parser.add_argument("--model", default="ggml-org/gemma-3-1b-it-GGUF", help="Model name (e.g., from llama-server -hf)")
+    parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
+    parser.add_argument("--batch-size", type=int, default=12, help="Messages per LLM request")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
-    parser.add_argument("--keep-alive", default="10m", help="Ollama keep_alive value")
     parser.add_argument(
         "--force-all",
         action="store_true",
@@ -252,6 +243,11 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Overwrite existing output files",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Display model request payload and answers",
     )
     return parser.parse_args()
 
@@ -286,13 +282,12 @@ def main() -> int:
         print("No HTML files found.", file=sys.stderr)
         return 2
 
-    translator = OllamaTranslator(
+    translator = LlamaCppTranslator(
         model=args.model,
         api_url=args.api_url,
         timeout=args.timeout,
-        keep_alive=args.keep_alive,
+        debug=args.debug,
     )
-    translator.preload()
 
     overall_translated = 0
 
