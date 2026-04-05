@@ -237,7 +237,7 @@ def parse_args() -> argparse.Namespace:
         description="Translate Messenger-exported HTML files from Russian to English using a local Ollama model."
     )
     parser.add_argument("input", type=Path, help="Input HTML file or directory")
-    parser.add_argument("output", type=Path, help="Output HTML file or directory")
+    parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
     parser.add_argument("--model", default="translategemma:latest", help="Ollama model name")
     parser.add_argument("--api-url", default=OLLAMA_DEFAULT_URL, help="Ollama /api/chat URL")
     parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
@@ -272,6 +272,14 @@ def main() -> int:
     if not input_path.exists():
         print(f"Input path does not exist: {input_path}", file=sys.stderr)
         return 2
+
+    if output_path is None:
+        if input_path.is_file():
+            # e.g., messages.html -> messages.translated.html
+            output_path = input_path.with_suffix(".translated" + input_path.suffix)
+        else:
+            # e.g., test/ -> test.translated/
+            output_path = input_path.with_name(input_path.name + ".translated")
 
     files = discover_html_files(input_path)
     if not files:
