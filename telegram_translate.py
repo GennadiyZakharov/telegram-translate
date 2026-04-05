@@ -14,8 +14,8 @@ import requests
 from bs4 import BeautifulSoup
 
 LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
-DEFAULT_SYSTEM_PROMPT = """You are a careful literary translator.
-Translate Russian chat messages into natural, fluent English.
+DEFAULT_SYSTEM_PROMPT = """You are a literary translator, translating a history of chat between two users.
+Translate chat messages from Russian into English.
 Rules:
 - Preserve the original meaning and tone.
 - Keep emojis, repeated punctuation, and casual style where sensible.
@@ -27,7 +27,6 @@ Rules:
 
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 LEAD_TRAIL_WS_RE = re.compile(r"^(\s*)(.*?)(\s*)$", re.DOTALL)
-
 
 @dataclass
 class MessageItem:
@@ -44,7 +43,7 @@ class LlamaCppTranslator:
         api_url: str = LLAMA_CPP_DEFAULT_URL,
         timeout: int = 300,
         temperature: float = 0.0,
-        retries: int = 3,
+        retries: int = 5,
         debug: bool = False,
     ):
         self.model = model
@@ -102,24 +101,29 @@ class LlamaCppTranslator:
         for attempt in range(1, self.retries + 1):
             try:
                 print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
-                if self.debug:
-                    print(f"Request payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
                 response = requests.post(self.api_url, json=payload, timeout=self.timeout)
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                if self.debug:
-                    print(f"Model response:\n{content}")
                 parsed = json.loads(content)
                 items = parsed["translations"]
                 result = [None] * len(texts)
                 for item in items:
                     idx = item["id"]
                     if not 0 <= idx < len(texts):
-                        raise ValueError(f"Invalid translation id returned: {idx}")
+                         if self.debug:
+                            print(f"Debug - invalid translation id returned: {idx}: {item["translated_text"]}")
+                            continue
+                         else:
+                            raise ValueError(f"Invalid translation id returned: {idx}")
                     result[idx] = item["translated_text"]
-                if any(v is None for v in result):
-                    raise ValueError("Model returned an incomplete translation batch")
+                if self.debug:
+                    print("Debug - side-by-side:")
+                    for idx, (orig, trans) in enumerate(zip(texts, result)):
+                        print(f"id: {idx}")
+                        print(f"{orig}\n{trans}\n")
+                    print("----------------------------------------------------------------")
+
                 return result  # type: ignore[return-value]
             except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
