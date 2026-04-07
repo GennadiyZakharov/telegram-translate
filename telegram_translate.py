@@ -7,7 +7,6 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from http.cookiejar import debug
 from pathlib import Path
 from typing import Iterable, List
 
@@ -53,6 +52,29 @@ class LlamaCppTranslator:
         self.temperature = temperature
         self.retries = retries
         self.debug = debug
+
+    def list_models(self) -> List[str]:
+        # Typical OpenAI-compatible /v1/models endpoint
+        # The api_url is /v1/chat/completions, so models URL should be /v1/models
+        models_url = self.api_url.replace("/chat/completions", "/models")
+        try:
+            if self.debug:
+                print(f"Querying models from {models_url}...")
+            response = requests.get(models_url, timeout=self.timeout)
+            response.raise_for_status()
+            data = response.json()
+            # /v1/models returns data which is a list of model objects
+            models = [m["id"] for m in data.get("data", [])]
+            if not models:
+                print("No LLMs are available on the server.")
+                return []
+            return models
+        except requests.RequestException as exc:
+            print(f"Error: Server is not responding or returned an error: {exc}")
+            return []
+        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error parsing server response: {exc}")
+            return []
 
     def translate_batch(self, texts: List[str]) -> List[str]:
         schema = {
@@ -235,7 +257,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server."
     )
-    parser.add_argument("input", type=Path, help="Input HTML file or directory")
+    parser.add_argument("input", type=Path, nargs="?", help="Input HTML file or directory")
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M", help="Model name (e.g., from llama-server -hf)")
     parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
@@ -256,6 +278,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Display model request payload and answers",
     )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="Query the server for available models and exit",
+    )
     return parser.parse_args()
 
 
@@ -269,8 +296,32 @@ def map_output_path(input_root: Path, output_root: Path, current_file: Path) -> 
 def main() -> int:
     args = parse_args()
 
-    input_path: Path = args.input
-    output_path: Path = args.output
+    translator = LlamaCppTranslator(
+        model=args.model,
+        api_url=args.api_url,
+        timeout=args.timeout,
+        debug=args.debug,
+    )
+
+    if args.list_models:
+        models = translator.list_models()
+        if models:
+            print("Available models:")
+            for m in models:
+                print(f" - {m}")
+            return 0
+        return 1
+
+    input_path: Path | None = args.input
+    output_path: Path | None = args.output
+
+    if input_path is None:
+        parser = argparse.ArgumentParser(
+            description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server."
+        )
+        # We need to re-parse or just show help if no input provided and not list-models
+        print("Error: the following arguments are required: input", file=sys.stderr)
+        return 2
 
     if not input_path.exists():
         print(f"Input path does not exist: {input_path}", file=sys.stderr)
