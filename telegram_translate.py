@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from http.cookiejar import debug
 from pathlib import Path
 from typing import Iterable, List
 
@@ -100,23 +101,22 @@ class LlamaCppTranslator:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             try:
-                print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
+                if self.debug:
+                    print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
                 response = requests.post(self.api_url, json=payload, timeout=self.timeout)
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
                 items = parsed["translations"]
-                result = [None] * len(texts)
+                result = ["Not translated - no matching LLM response"]*len(texts)
                 for item in items:
                     idx = item["id"]
-                    if not 0 <= idx < len(texts):
-                         if self.debug:
-                            print(f"Debug - invalid translation id returned: {idx}: {item["translated_text"]}")
-                            continue
-                         else:
-                            raise ValueError(f"Invalid translation id returned: {idx}")
+                    if not (0 <= idx < len(texts)):
+                        print(f"Warning: Unexpected translation id returned: {idx}. Message: {item['translated_text']}")
+                        continue
                     result[idx] = item["translated_text"]
+
                 if self.debug:
                     print("Debug - side-by-side:")
                     for idx, (orig, trans) in enumerate(zip(texts, result)):
@@ -125,13 +125,15 @@ class LlamaCppTranslator:
                     print("----------------------------------------------------------------")
 
                 return result  # type: ignore[return-value]
+
             except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
+                print(f"Error during translation attempt {attempt + 1}/{self.retries}: {exc}")
                 if attempt == self.retries:
                     break
                 time.sleep(min(2**attempt, 8))
 
-        raise RuntimeError(f"Failed to translate batch after {self.retries} attempts: {last_error}")
+        return result
 
 
 def extract_inner_text(raw_text: str) -> tuple[str, str, str]:
@@ -206,6 +208,7 @@ def translate_html_file(
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i : i + batch_size]
         src_texts = [item.text for _, item in batch]
+        print(f"Translating batch {i} with {len(src_texts)} messages...")
         translated = translator.translate_batch(src_texts)
         for (div, item), out_text in zip(batch, translated):
             replace_div_text(div, f"{item.leading_ws}{out_text}{item.trailing_ws}")
@@ -234,7 +237,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("input", type=Path, help="Input HTML file or directory")
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
-    parser.add_argument("--model", default="ggml-org/gemma-3-1b-it-GGUF", help="Model name (e.g., from llama-server -hf)")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M", help="Model name (e.g., from llama-server -hf)")
     parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
     parser.add_argument("--batch-size", type=int, default=12, help="Messages per LLM request")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
