@@ -28,12 +28,31 @@ Rules:
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 LEAD_TRAIL_WS_RE = re.compile(r"^(\s*)(.*?)(\s*)$", re.DOTALL)
 
+TRANSLIT_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya",
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E", "Ё": "Yo", "Ж": "Zh",
+    "З": "Z", "И": "I", "Й": "Y", "К": "K", "Л": "L", "М": "M", "Н": "N", "О": "O",
+    "П": "P", "Р": "R", "С": "S", "Т": "T", "У": "U", "Ф": "F", "Х": "Kh", "Ц": "Ts",
+    "Ч": "Ch", "Ш": "Sh", "Щ": "Shch", "Ъ": "", "Ы": "Y", "Ь": "", "Э": "E", "Ю": "Yu",
+    "Я": "Ya",
+}
+
+
+def transliterate(text: str) -> str:
+    return "".join(TRANSLIT_MAP.get(c, c) for c in text)
+
+
 @dataclass
 class MessageItem:
     key: str
     text: str
     leading_ws: str
     trailing_ws: str
+    speaker: str = ""
 
 
 class LlamaCppTranslator:
@@ -76,7 +95,7 @@ class LlamaCppTranslator:
             print(f"Error parsing server response: {exc}")
             return []
 
-    def translate_batch(self, texts: List[str]) -> List[str]:
+    def translate_batch(self, texts: List[str], speakers: List[str]) -> List[str]:
         schema = {
             "type": "object",
             "properties": {
@@ -97,11 +116,13 @@ class LlamaCppTranslator:
             "additionalProperties": False,
         }
 
-        numbered = [{"id": i, "text": t} for i, t in enumerate(texts)]
+        numbered = [{"id": i, "speaker": p, "text": t} for i, (p, t) in enumerate(zip(speakers, texts))]
         user_prompt = (
             "Translate the following chat messages from Russian to English. "
+            "Use the 'speaker' field to understand who is typing the message and maintain consistent translation."
             "Return JSON strictly matching this schema. "
             "Keep the same number of items and the same ids.\n\n"
+            "Do not put speaker name in the translation. Use it only to maintain context.\n\n"
             f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
             f"Messages:\n{json.dumps(numbered, ensure_ascii=False, indent=2)}"
         )
@@ -141,8 +162,8 @@ class LlamaCppTranslator:
 
                 if self.debug:
                     print("Debug - side-by-side:")
-                    for idx, (orig, trans) in enumerate(zip(texts, result)):
-                        print(f"id: {idx}")
+                    for idx, (orig, trans, pers) in enumerate(zip(texts, result, speakers)):
+                        print(f"id: {idx} (person: {pers})")
                         print(f"{orig}\n{trans}\n")
                     print("----------------------------------------------------------------")
 
@@ -174,13 +195,6 @@ def needs_translation(text: str, force_all: bool = False) -> bool:
     return bool(CYRILLIC_RE.search(stripped))
 
 
-def iter_message_divs(soup: BeautifulSoup):
-    for div in soup.find_all("div"):
-        classes = div.get("class", [])
-        if "text" in classes:
-            yield div
-
-
 def replace_div_text(div, new_text: str) -> None:
     div.clear()
     div.append(new_text)
@@ -205,33 +219,48 @@ def translate_html_file(
     html = input_path.read_text(encoding="utf-8")
     soup = BeautifulSoup(html, "html.parser")
 
-    divs = list(iter_message_divs(soup))
     candidates: list[tuple[object, MessageItem]] = []
     translated_blocks = 0
+    current_speaker = ""
 
-    for idx, div in enumerate(divs):
-        raw_text = div.get_text(separator="", strip=False)
-        leading_ws, core_text, trailing_ws = extract_inner_text(raw_text)
-        if not needs_translation(core_text, force_all=force_all):
+    # Try to find header name
+    header_name_div = soup.find("div", class_="page_header").find("div", class_="text bold") if soup.find("div", class_="page_header") else None
+    if header_name_div:
+        current_speaker = transliterate(header_name_div.get_text(strip=True))
+
+    # Iterate through all divs to find names and text
+    for idx, div in enumerate(soup.find_all("div")):
+        classes = div.get("class", [])
+        if "from_name" in classes:
+            name_text = div.get_text(strip=True)
+            current_speaker = transliterate(name_text)
             continue
-        key = f"{input_path.name}::{idx}"
-        candidates.append(
-            (
-                div,
-                MessageItem(
-                    key=key,
-                    text=core_text,
-                    leading_ws=leading_ws,
-                    trailing_ws=trailing_ws,
-                ),
+
+        if "text" in classes:
+            raw_text = div.get_text(separator="", strip=False)
+            leading_ws, core_text, trailing_ws = extract_inner_text(raw_text)
+            if not needs_translation(core_text, force_all=force_all):
+                continue
+            key = f"{input_path.name}::{idx}"
+            candidates.append(
+                (
+                    div,
+                    MessageItem(
+                        key=key,
+                        text=core_text,
+                        leading_ws=leading_ws,
+                        trailing_ws=trailing_ws,
+                        speaker=current_speaker,
+                    ),
+                )
             )
-        )
 
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i : i + batch_size]
         src_texts = [item.text for _, item in batch]
+        src_speakers = [item.speaker for _, item in batch]
         print(f"Translating batch {i} with {len(src_texts)} messages...")
-        translated = translator.translate_batch(src_texts)
+        translated = translator.translate_batch(src_texts, src_speakers)
         for (div, item), out_text in zip(batch, translated):
             replace_div_text(div, f"{item.leading_ws}{out_text}{item.trailing_ws}")
             translated_blocks += 1
