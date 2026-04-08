@@ -17,12 +17,13 @@ LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 DEFAULT_SYSTEM_PROMPT = """You are a literary translator, translating a history of chat between two users.
 Translate chat messages from Russian into English.
 Rules:
+- Return ENGLISH translation of the original message text.
+- If a message is already in English or does not need translation, return it unchanged.
+- Do not add explanations.
+- Return JSON strictly matching this schema.
 - Preserve the original meaning and tone.
 - Keep emojis, repeated punctuation, and casual style where sensible.
-- Do not add explanations.
-- Return only the JSON requested by the schema.
-- If a message is already in English or does not need translation, return it unchanged.
-- Keep line breaks if they matter.
+- If emoji contain non-latin symbols, substitute it by corresponding latin symbols. 
 """
 
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
@@ -62,7 +63,7 @@ class LlamaCppTranslator:
         api_url: str = LLAMA_CPP_DEFAULT_URL,
         timeout: int = 300,
         temperature: float = 0.0,
-        retries: int = 5,
+        retries: int = 3,
         debug: bool = False,
     ):
         self.model = model
@@ -120,7 +121,6 @@ class LlamaCppTranslator:
         user_prompt = (
             "Translate the following chat messages from Russian to English. "
             "Use the 'speaker' field to understand who is typing the message and maintain consistent translation."
-            "Return JSON strictly matching this schema. "
             "Keep the same number of items and the same ids.\n\n"
             "Do not put speaker name in the translation. Use it only to maintain context.\n\n"
             f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
@@ -142,7 +142,8 @@ class LlamaCppTranslator:
         }
 
         last_error: Exception | None = None
-        for attempt in range(1, self.retries + 1):
+        attempt = 0
+        while attempt < self.retries:
             try:
                 if self.debug:
                     print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
@@ -158,7 +159,10 @@ class LlamaCppTranslator:
                     if not (0 <= idx < len(texts)):
                         print(f"Warning: Unexpected translation id returned: {idx}. Message: {item['translated_text']}")
                         continue
-                    result[idx] = item["translated_text"]
+                    translated_text = item["translated_text"]
+                    if CYRILLIC_RE.search(translated_text):
+                        raise ValueError(f"Non-latin character detected in translation for id {idx}: {translated_text}")
+                    result[idx] = translated_text
 
                 if self.debug:
                     print("Debug - side-by-side:")
@@ -170,11 +174,10 @@ class LlamaCppTranslator:
                 return result  # type: ignore[return-value]
 
             except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
-                last_error = exc
                 print(f"Error during translation attempt {attempt + 1}/{self.retries}: {exc}")
-                if attempt == self.retries:
-                    break
+                attempt += 1
                 time.sleep(min(2**attempt, 8))
+                continue
 
         return result
 
