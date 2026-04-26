@@ -286,9 +286,28 @@ def discover_html_files(input_path: Path) -> list[Path]:
     return sorted(p for p in input_path.rglob("*.html") if p.is_file())
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.ArgumentParser:
+    # Try to fetch available models for the help message
+    available_models_str = ""
+    models_url = LLAMA_CPP_DEFAULT_URL.replace("/chat/completions", "/models")
+    try:
+        # We don't have the translator yet, but we can do a quick request
+        # Default URL is LLAMA_CPP_DEFAULT_URL
+        response = requests.get(models_url, timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m["id"] for m in data.get("data", [])]
+            if models:
+                available_models_str = "\n\nAvailable models on the server:\n" + "\n".join(f"  - {m}" for m in models)
+    except Exception:
+        pass
+
+    if available_models_str == "":
+        available_models_str = f"\n\nWARNING: No available LLMs found on the server {models_url}"
+
     parser = argparse.ArgumentParser(
-        description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server."
+        description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server." + available_models_str,
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("input", type=Path, nargs="?", help="Input HTML file or directory")
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
@@ -311,11 +330,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Display model request payload and answers",
     )
-    parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="Query the server for available models and exit",
-    )
+    if return_parser:
+        return parser
     return parser.parse_args()
 
 
@@ -336,24 +352,13 @@ def main() -> int:
         debug=args.debug,
     )
 
-    if args.list_models:
-        models = translator.list_models()
-        if models:
-            print("Available models:")
-            for m in models:
-                print(f" - {m}")
-            return 0
-        return 1
-
     input_path: Path | None = args.input
     output_path: Path | None = args.output
 
     if input_path is None:
-        parser = argparse.ArgumentParser(
-            description="Translate Messenger-exported HTML files from Russian to English using a local llama.cpp server."
-        )
-        # We need to re-parse or just show help if no input provided and not list-models
-        print("Error: the following arguments are required: input", file=sys.stderr)
+        # We need to show help if no input provided
+        parse_args(return_parser=True).print_help()
+        print("\nError: the following arguments are required: input", file=sys.stderr)
         return 2
 
     if not input_path.exists():
