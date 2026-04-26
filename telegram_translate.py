@@ -47,7 +47,7 @@ def transliterate(text: str) -> str:
     return "".join(TRANSLIT_MAP.get(c, c) for c in text)
 
 
-@dataclass
+@dataclass(slots=True)
 class MessageItem:
     key: str
     text: str
@@ -143,6 +143,7 @@ class LlamaCppTranslator:
 
         last_error: Exception | None = None
         attempt = 0
+        result: List[str] = ["Not translated - error"] * len(texts)
         while attempt < self.retries:
             try:
                 if self.debug:
@@ -380,6 +381,17 @@ def main() -> int:
     )
 
     overall_translated = 0
+
+    # Check if server is running and model is available
+    available_models = translator.list_models()
+    if not available_models:
+        print("Error: Could not connect to the LLM server or no models available.", file=sys.stderr)
+        return 1
+    
+    if args.model not in available_models:
+        print(f"Error: Requested model '{args.model}' is not available on the server.", file=sys.stderr)
+        print(f"Available models: {', '.join(available_models)}", file=sys.stderr)
+        return 1
 
     for file_path in files:
         target = map_output_path(input_path, output_path, file_path)
