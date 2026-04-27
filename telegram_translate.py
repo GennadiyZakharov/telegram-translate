@@ -14,16 +14,17 @@ import requests
 from bs4 import BeautifulSoup
 
 LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
-DEFAULT_SYSTEM_PROMPT = """You are a literary translator, translating a history of chat between two users.
-Translate chat messages from Russian into English.
+DEFAULT_SYSTEM_PROMPT = """You are a precise translator for Telegram chat history.
+Your goal is to translate messages from Russian to English.
+
 Rules:
-- Return ENGLISH translation of the original message text.
-- If a message is already in English or does not need translation, return it unchanged.
-- Do not add explanations.
-- Return JSON strictly matching this schema.
-- Preserve the original meaning and tone.
-- Keep emojis, repeated punctuation, and casual style where sensible.
-- If emoji contain non-latin symbols, substitute it by corresponding latin symbols. 
+1. Each 'translated_text' must be the English translation of the corresponding Russian 'text'.
+2. Maintain the same 'id' for each message."
+3. If the message is already in English, or is just a link/emoji/number, return it as is.
+4. NEVER return the 'speaker' name as the translation.
+5. NEVER explain your work or add any text outside the JSON structure.
+6. Strictly follow the provided JSON schema.
+7. Preserve the original tone and casual style (emojis, punctuation).
 """
 
 NOT_TRANSLATED_MESSAGE = "Not translated - error"
@@ -136,12 +137,9 @@ class LlamaCppTranslator:
             # Running translation of the full batch to maintain a consistent dialog
             numbered = [{"id": i, "speaker": p, "text": t} for i, (p, t) in enumerate(zip(speakers, texts))]
             user_prompt = (
-                "Translate the following chat messages from Russian to English. "
-                "Use the 'speaker' field to understand who is typing the message and maintain consistent translation."
-                "Keep the same number of items and the same ids.\n\n"
-                "Do not put speaker name in the translation. Use it only to maintain context.\n\n"
+                "Translate the following chat messages from Russian to English.\n\n"              
                 f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
-                f"Messages:\n{json.dumps(numbered, ensure_ascii=False, indent=2)}"
+                f"Messages to translate:\n{json.dumps(numbered, ensure_ascii=False, indent=2)}"
             )
 
             payload = {
@@ -171,16 +169,28 @@ class LlamaCppTranslator:
                 
                 new_translations_count = 0
                 for item in items:
-                    idx = item["id"]
+                    idx = item.get("id")
+                    if idx is None:
+                        continue
                     if results[idx] != "":  # We already have this message translated, skip it
                         continue
                     if not (0 <= idx < len(texts)):
-                        print(f"Warning: Unexpected translation id returned: {idx}. Message: {item['translated_text']}")
+                        print(f"Warning: Unexpected translation id returned: {idx}. Message: {item.get('translated_text')}")
                         continue
-                    translated_text = item["translated_text"]
+                    translated_text = item.get("translated_text", "")
+                    
+                    # Validation: check if LLM returned Cyrillic
                     if CYRILLIC_RE.search(translated_text):
-                        print(f"Non-latin character detected in translation for id {idx}: {translated_text}")
+                        if self.debug:
+                            print(f"Non-latin character detected in translation for id {idx}: {translated_text}")
                         continue
+                    
+                    # Validation: check if LLM just returned the speaker's name -
+                    if translated_text.strip().lower() == speakers[idx].strip().lower() and translated_text.strip() != "":
+                         if self.debug:
+                            print(f"LLM returned speaker name instead of translation for id {idx}: {translated_text}")
+                         continue
+
                     results[idx] = translated_text
                     new_translations_count += 1
 
