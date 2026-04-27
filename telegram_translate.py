@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Dict, List, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,6 +25,8 @@ Rules:
 - Keep emojis, repeated punctuation, and casual style where sensible.
 - If emoji contain non-latin symbols, substitute it by corresponding latin symbols. 
 """
+
+NOT_TRANSLATED_MESSAGE = "Not translated - error"
 
 CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 LEAD_TRAIL_WS_RE = re.compile(r"^(\s*)(.*?)(\s*)$", re.DOTALL)
@@ -57,6 +59,8 @@ class MessageItem:
 
 
 class LlamaCppTranslator:
+    """A translator class that uses a llama.cpp server's OpenAI-compatible API."""
+
     def __init__(
         self,
         model: str,
@@ -65,7 +69,7 @@ class LlamaCppTranslator:
         temperature: float = 0.0,
         retries: int = 3,
         debug: bool = False,
-    ):
+    ) -> None:
         self.model = model
         self.api_url = api_url
         self.timeout = timeout
@@ -74,6 +78,7 @@ class LlamaCppTranslator:
         self.debug = debug
 
     def list_models(self) -> List[str]:
+        """Fetch the list of available models from the server."""
         # Typical OpenAI-compatible /v1/models endpoint
         # The api_url is /v1/chat/completions, so models URL should be /v1/models
         models_url = self.api_url.replace("/chat/completions", "/models")
@@ -97,6 +102,7 @@ class LlamaCppTranslator:
             return []
 
     def translate_batch(self, texts: List[str], speakers: List[str]) -> List[str]:
+        """Translate a batch of messages, maintaining conversation context."""
         schema = {
             "type": "object",
             "properties": {
@@ -117,73 +123,96 @@ class LlamaCppTranslator:
             "additionalProperties": False,
         }
 
-        numbered = [{"id": i, "speaker": p, "text": t} for i, (p, t) in enumerate(zip(speakers, texts))]
-        user_prompt = (
-            "Translate the following chat messages from Russian to English. "
-            "Use the 'speaker' field to understand who is typing the message and maintain consistent translation."
-            "Keep the same number of items and the same ids.\n\n"
-            "Do not put speaker name in the translation. Use it only to maintain context.\n\n"
-            f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
-            f"Messages:\n{json.dumps(numbered, ensure_ascii=False, indent=2)}"
-        )
 
-        payload = {
-            "model": self.model,
-            "stream": False,
-            "temperature": self.temperature,
-            "response_format": {
-                "type": "json_object",
-                "schema": schema,
-            },
-            "messages": [
-                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-
-        last_error: Exception | None = None
+        results: List[str] = [""] * len(texts)
         attempt = 0
-        result: List[str] = ["Not translated - error"] * len(texts)
+
         while attempt < self.retries:
+            # Identify indices that still need translation
+            pending_indices = [i for i, res in enumerate(results) if res == ""]
+            if not pending_indices: # Everything has been translated
+                break
+
+            # Running translation of the full batch to maintain a consistent dialog
+            numbered = [{"id": i, "speaker": p, "text": t} for i, (p, t) in enumerate(zip(speakers, texts))]
+            user_prompt = (
+                "Translate the following chat messages from Russian to English. "
+                "Use the 'speaker' field to understand who is typing the message and maintain consistent translation."
+                "Keep the same number of items and the same ids.\n\n"
+                "Do not put speaker name in the translation. Use it only to maintain context.\n\n"
+                f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
+                f"Messages:\n{json.dumps(numbered, ensure_ascii=False, indent=2)}"
+            )
+
+            payload = {
+                "model": self.model,
+                "stream": False,
+                "temperature": self.temperature,
+                "response_format": {
+                    "type": "json_object",
+                    "schema": schema,
+                },
+                "messages": [
+                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+
             try:
                 if self.debug:
-                    print("Running translation for a message batch of size", len(texts), "with model", self.model, "attempt", attempt,"...")
+                    print(f"Running translation for {len(texts)} messages (attempt {attempt + 1}/{self.retries}) with model {self.model}...")
+                
                 response = requests.post(self.api_url, json=payload, timeout=self.timeout)
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
                 items = parsed["translations"]
-                result = ["Not translated - no matching LLM response"]*len(texts)
+                
+                new_translations_count = 0
                 for item in items:
                     idx = item["id"]
+                    if results[idx] != "":  # We already have this message translated, skip it
+                        continue
                     if not (0 <= idx < len(texts)):
                         print(f"Warning: Unexpected translation id returned: {idx}. Message: {item['translated_text']}")
                         continue
                     translated_text = item["translated_text"]
                     if CYRILLIC_RE.search(translated_text):
-                        raise ValueError(f"Non-latin character detected in translation for id {idx}: {translated_text}")
-                    result[idx] = translated_text
+                        print(f"Non-latin character detected in translation for id {idx}: {translated_text}")
+                        continue
+                    results[idx] = translated_text
+                    new_translations_count += 1
 
                 if self.debug:
-                    print("Debug - side-by-side:")
-                    for idx, (orig, trans, pers) in enumerate(zip(texts, result, speakers)):
-                        print(f"id: {idx} (person: {pers})")
-                        print(f"{orig}\n{trans}\n")
-                    print("----------------------------------------------------------------")
-
-                return result  # type: ignore[return-value]
+                    print(f"Successfully translated {new_translations_count} messages in this attempt.")
+                
+                # If we translated everything we asked for, we are done
+                if new_translations_count == len(pending_indices):
+                    break
+                
+                # If we got some but not all, we'll retry the rest in the next iteration
+                attempt += 1
 
             except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
                 print(f"Error during translation attempt {attempt + 1}/{self.retries}: {exc}")
                 attempt += 1
-                time.sleep(min(2**attempt, 8))
+                if attempt < self.retries:
+                    time.sleep(min(2**attempt, 8))
                 continue
 
-        return result
+        if self.debug:
+            print("Debug - translated messages:")
+            for idx, (orig, trans, pers) in enumerate(zip(texts, results, speakers)):
+                print(f"id: {idx} (person: {pers})")
+                print(f"{orig}\n{trans}\n")
+            print("----------------------------------------------------------------")
+
+        return results
 
 
-def extract_inner_text(raw_text: str) -> tuple[str, str, str]:
+def extract_inner_text(raw_text: str) -> Tuple[str, str, str]:
+    """Extract leading whitespace, core text, and trailing whitespace."""
     match = LEAD_TRAIL_WS_RE.match(raw_text)
     if not match:
         return "", raw_text, ""
@@ -191,6 +220,7 @@ def extract_inner_text(raw_text: str) -> tuple[str, str, str]:
 
 
 def needs_translation(text: str, force_all: bool = False) -> bool:
+    """Check if the text needs translation (contains Cyrillic or force_all is True)."""
     stripped = text.strip()
     if not stripped:
         return False
@@ -199,7 +229,8 @@ def needs_translation(text: str, force_all: bool = False) -> bool:
     return bool(CYRILLIC_RE.search(stripped))
 
 
-def replace_div_text(div, new_text: str) -> None:
+def replace_div_text(div: Any, new_text: str) -> None:
+    """Replace the text content of a BeautifulSoup tag."""
     div.clear()
     div.append(new_text)
 
@@ -211,7 +242,8 @@ def translate_html_file(
     batch_size: int,
     force_all: bool,
     overwrite: bool,
-) -> dict:
+) -> Dict[str, Any]:
+    """Translate all eligible text blocks in an HTML file."""
     if output_path.exists() and not overwrite:
         return {
             "file": str(input_path),
@@ -223,7 +255,7 @@ def translate_html_file(
     html = input_path.read_text(encoding="utf-8")
     soup = BeautifulSoup(html, "html.parser")
 
-    candidates: list[tuple[object, MessageItem]] = []
+    candidates: List[Tuple[Any, MessageItem]] = []
     translated_blocks = 0
     current_speaker = ""
 
@@ -235,13 +267,18 @@ def translate_html_file(
     # Iterate through all divs to find names and text
     for idx, div in enumerate(soup.find_all("div")):
         classes = div.get("class", [])
+        if not isinstance(classes, list):
+            classes = [classes] if classes else []
         if "from_name" in classes:
             name_text = div.get_text(strip=True)
             current_speaker = transliterate(name_text)
             continue
 
         if "text" in classes:
-            raw_text = div.get_text(separator="", strip=False)
+            # We use get_text with separator="" and strip=False to preserve whitespace between tags
+            # but BeautifulSoup's get_text doesn't actually take a separator as a positional argument in all versions, 
+            # and separator="" is default in some contexts.
+            raw_text = div.get_text(strip=False)
             leading_ws, core_text, trailing_ws = extract_inner_text(raw_text)
             if not needs_translation(core_text, force_all=force_all):
                 continue
@@ -280,13 +317,15 @@ def translate_html_file(
     }
 
 
-def discover_html_files(input_path: Path) -> list[Path]:
+def discover_html_files(input_path: Path) -> List[Path]:
+    """Find all HTML files in the given path (file or directory)."""
     if input_path.is_file():
         return [input_path]
     return sorted(p for p in input_path.rglob("*.html") if p.is_file())
 
 
 def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.ArgumentParser:
+    """Parse command-line arguments."""
     # Try to fetch available models for the help message
     available_models_str = ""
     models_url = LLAMA_CPP_DEFAULT_URL.replace("/chat/completions", "/models")
@@ -313,7 +352,7 @@ def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.Arg
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M", help="Model name (e.g., from llama-server -hf)")
     parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
-    parser.add_argument("--batch-size", type=int, default=12, help="Messages per LLM request")
+    parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
     parser.add_argument(
         "--force-all",
@@ -336,6 +375,7 @@ def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.Arg
 
 
 def map_output_path(input_root: Path, output_root: Path, current_file: Path) -> Path:
+    """Map an input file path to its corresponding output path."""
     if input_root.is_file():
         return output_root
     relative = current_file.relative_to(input_root)
@@ -344,13 +384,6 @@ def map_output_path(input_root: Path, output_root: Path, current_file: Path) -> 
 
 def main() -> int:
     args = parse_args()
-
-    translator = LlamaCppTranslator(
-        model=args.model,
-        api_url=args.api_url,
-        timeout=args.timeout,
-        debug=args.debug,
-    )
 
     input_path: Path | None = args.input
     output_path: Path | None = args.output
@@ -378,14 +411,14 @@ def main() -> int:
         print("No HTML files found.", file=sys.stderr)
         return 2
 
+    overall_translated = 0
+
     translator = LlamaCppTranslator(
         model=args.model,
         api_url=args.api_url,
         timeout=args.timeout,
         debug=args.debug,
     )
-
-    overall_translated = 0
 
     # Check if server is running and model is available
     available_models = translator.list_models()
