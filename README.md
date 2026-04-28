@@ -80,6 +80,23 @@ Overwrite output files if they already exist.
 ```
 Ask Ollama to keep the model loaded in memory for faster repeated requests.
 
+```bash
+--glossary glossary.tsv
+```
+Read approved phrase translations from a tab-separated glossary file.
+By default, the script reads `glossary.tsv` from the project root if it exists.
+
+The file must have three tab-separated columns:
+
+```tsv
+phrase	translation	comment
+телега	Telegram	The name of the messenger where this conversation takes place
+```
+
+The glossary is added to the LLM system prompt. The model is instructed to use
+the provided translation for matching phrases, while the comment can explain
+which context the translation applies to.
+
 ## Suggested models
 
 For RU → EN chat translation, strong instruction-following models are usually the safest choice locally. 

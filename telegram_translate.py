@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -14,17 +15,18 @@ import requests
 from bs4 import BeautifulSoup
 
 LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
-DEFAULT_SYSTEM_PROMPT = """You are a precise translator for Telegram chat history.
+DEFAULT_GLOSSARY_PATH = Path(__file__).with_name("glossary.tsv")
+DEFAULT_SYSTEM_PROMPT = """You are a precise translator for conversation chat history.
 Your goal is to translate messages from Russian to English.
 
 Rules:
-1. Each 'translated_text' must be the English translation of the corresponding Russian 'text'.
+1. Strictly follow the provided JSON schema.
 2. Maintain the same 'id' for each message."
-3. If the message is already in English, or is just a link/emoji/number, return it as is.
-4. NEVER return the 'speaker' name as the translation.
+3. Each 'translated_text' must be the English translation of the corresponding Russian 'text'.
+4. If the message is already in English, or is just a link/emoji/number, return it as is.
+4. use the 'speaker' name to understand the context. Don't return the 'speaker' name as the translation.
 5. NEVER explain your work or add any text outside the JSON structure.
-6. Strictly follow the provided JSON schema.
-7. Preserve the original tone and casual style (emojis, punctuation).
+8. When a glossary is provided, use its translations for matching phrases unless the glossary comment says a different context applies.
 """
 
 NOT_TRANSLATED_MESSAGE = "Not translated - error"
@@ -59,6 +61,67 @@ class MessageItem:
     speaker: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class GlossaryEntry:
+    phrase: str
+    translation: str
+    comment: str = ""
+
+
+def load_glossary(path: Path) -> List[GlossaryEntry]:
+    """Load optional phrase translations from a tab-separated glossary file."""
+    if not path.exists():
+        return []
+
+    entries: List[GlossaryEntry] = []
+    with path.open("r", encoding="utf-8", newline="") as glossary_file:
+        reader = csv.reader(glossary_file, delimiter="\t")
+        for line_number, row in enumerate(reader, start=1):
+            if not row or all(not cell.strip() for cell in row):
+                continue
+
+            normalized = [cell.strip() for cell in row]
+            if line_number == 1 and [cell.lower() for cell in normalized[:3]] == ["phrase", "translation", "comment"]:
+                continue
+
+            if len(normalized) != 3:
+                print(
+                    f"Warning: Skipping glossary row {line_number} in {path}: expected 3 tab-separated columns.",
+                    file=sys.stderr,
+                )
+                continue
+
+            phrase, translation, comment = normalized
+            if not phrase or not translation:
+                print(
+                    f"Warning: Skipping glossary row {line_number} in {path}: phrase and translation are required.",
+                    file=sys.stderr,
+                )
+                continue
+
+            entries.append(GlossaryEntry(phrase=phrase, translation=translation, comment=comment))
+
+    return entries
+
+
+def build_system_prompt(glossary_entries: List[GlossaryEntry]) -> str:
+    """Append glossary entries to the translator system prompt."""
+    if not glossary_entries:
+        return DEFAULT_SYSTEM_PROMPT
+
+    glossary_lines = [
+        "",
+        "Glossary:",
+        "Use these approved phrase translations when they appear in the messages.",
+        "Don't insert comment - use in only to understand the context of the glossary terms."
+        "Format: source phrase<TAB>translation<TAB>comment",
+    ]
+    glossary_lines.extend(
+        f"{entry.phrase}\t{entry.translation}\t{entry.comment}" for entry in glossary_entries
+    )
+    return DEFAULT_SYSTEM_PROMPT + "\n".join(glossary_lines) + "\n"
+
+
 class LlamaCppTranslator:
     """A translator class that uses a llama.cpp server's OpenAI-compatible API."""
 
@@ -70,6 +133,7 @@ class LlamaCppTranslator:
         temperature: float = 0.0,
         retries: int = 3,
         debug: bool = False,
+        glossary_entries: List[GlossaryEntry] | None = None,
     ) -> None:
         self.model = model
         self.api_url = api_url
@@ -77,6 +141,8 @@ class LlamaCppTranslator:
         self.temperature = temperature
         self.retries = retries
         self.debug = debug
+        self.glossary_entries = glossary_entries or []
+        self.system_prompt = build_system_prompt(self.glossary_entries)
 
     def list_models(self) -> List[str]:
         """Fetch the list of available models from the server."""
@@ -151,7 +217,7 @@ class LlamaCppTranslator:
                     "schema": schema,
                 },
                 "messages": [
-                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                    {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             }
@@ -185,12 +251,6 @@ class LlamaCppTranslator:
                             print(f"Non-latin character detected in translation for id {idx}: {translated_text}")
                         continue
                     
-                    # Validation: check if LLM just returned the speaker's name -
-                    if translated_text.strip().lower() == speakers[idx].strip().lower() and translated_text.strip() != "":
-                         if self.debug:
-                            print(f"LLM returned speaker name instead of translation for id {idx}: {translated_text}")
-                         continue
-
                     results[idx] = translated_text
                     new_translations_count += 1
 
@@ -365,6 +425,12 @@ def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.Arg
     parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
     parser.add_argument(
+        "--glossary",
+        type=Path,
+        default=DEFAULT_GLOSSARY_PATH,
+        help=f"Tab-separated glossary file with phrase, translation, comment columns (default: {DEFAULT_GLOSSARY_PATH})",
+    )
+    parser.add_argument(
         "--force-all",
         action="store_true",
         help="Translate all <div class=\"text\"> blocks, even if they do not contain Cyrillic",
@@ -422,12 +488,18 @@ def main() -> int:
         return 2
 
     overall_translated = 0
+    glossary_entries = load_glossary(args.glossary)
+    if glossary_entries:
+        print(f"Loaded glossary entries: {len(glossary_entries)} from {args.glossary}")
+    elif args.glossary.exists():
+        print(f"Glossary file has no usable entries: {args.glossary}")
 
     translator = LlamaCppTranslator(
         model=args.model,
         api_url=args.api_url,
         timeout=args.timeout,
         debug=args.debug,
+        glossary_entries=glossary_entries,
     )
 
     # Check if server is running and model is available
