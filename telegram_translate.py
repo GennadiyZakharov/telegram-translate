@@ -305,6 +305,34 @@ def replace_div_text(div: Any, new_text: str) -> None:
     div.append(new_text)
 
 
+def transliterate_name_div(div: Any, name_transliterations: Dict[str, str]) -> str:
+    """Transliterate a person-name tag in place and return the prompt speaker name."""
+    name_text = div.get_text(strip=True)
+    transliterated_name = transliterate(name_text)
+    if name_text:
+        name_transliterations[name_text] = transliterated_name
+    replace_div_text(div, transliterated_name)
+    return transliterated_name
+
+
+def transliterate_known_name_attributes(soup: BeautifulSoup, name_transliterations: Dict[str, str]) -> None:
+    """Transliterate attributes that exactly match already-seen person names."""
+    for tag in soup.find_all(title=True):
+        title = tag.get("title")
+        if title in name_transliterations:
+            tag["title"] = name_transliterations[title]
+
+
+def transliterate_known_name_text_tags(soup: BeautifulSoup, name_transliterations: Dict[str, str]) -> None:
+    """Transliterate simple text tags that exactly match already-seen person names."""
+    for tag in soup.find_all(True):
+        if tag.find(True):
+            continue
+        text = tag.get_text(strip=True)
+        if text in name_transliterations:
+            replace_div_text(tag, name_transliterations[text])
+
+
 def translate_html_file(
     input_path: Path,
     output_path: Path,
@@ -328,11 +356,12 @@ def translate_html_file(
     candidates: List[Tuple[Any, MessageItem]] = []
     translated_blocks = 0
     current_speaker = ""
+    name_transliterations: Dict[str, str] = {}
 
     # Try to find header name
     header_name_div = soup.find("div", class_="page_header").find("div", class_="text bold") if soup.find("div", class_="page_header") else None
     if header_name_div:
-        current_speaker = transliterate(header_name_div.get_text(strip=True))
+        current_speaker = transliterate_name_div(header_name_div, name_transliterations)
 
     # Iterate through all divs to find names and text
     for idx, div in enumerate(soup.find_all("div")):
@@ -340,11 +369,10 @@ def translate_html_file(
         if not isinstance(classes, list):
             classes = [classes] if classes else []
         if "from_name" in classes:
-            name_text = div.get_text(strip=True)
-            current_speaker = transliterate(name_text)
+            current_speaker = transliterate_name_div(div, name_transliterations)
             continue
 
-        if "text" in classes:
+        if "text" in classes and div is not header_name_div:
             # We use get_text with separator="" and strip=False to preserve whitespace between tags
             # but BeautifulSoup's get_text doesn't actually take a separator as a positional argument in all versions, 
             # and separator="" is default in some contexts.
@@ -365,6 +393,9 @@ def translate_html_file(
                     ),
                 )
             )
+
+    transliterate_known_name_attributes(soup, name_transliterations)
+    transliterate_known_name_text_tags(soup, name_transliterations)
 
     for i in range(0, len(candidates), batch_size):
         batch = candidates[i : i + batch_size]
@@ -420,10 +451,10 @@ def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.Arg
     )
     parser.add_argument("input", type=Path, nargs="?", help="Input HTML file or directory")
     parser.add_argument("output", type=Path, nargs="?", help="Output HTML file or directory")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M", help="Model name (e.g., from llama-server -hf)")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-14B-Instruct-GGUF:Q5_K_M", help="Model name (e.g., from llama-server -hf)")
     parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
-    parser.add_argument("--batch-size", type=int, default=24, help="Messages per LLM request")
-    parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
+    parser.add_argument("--batch-size", type=int, default=48, help="Messages per LLM request")
+    parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
     parser.add_argument(
         "--glossary",
         type=Path,

@@ -1,3 +1,3 @@
 #!/bin/bash
 
-./telegram_translate.py --debug --overwrite test/messages.html
+uv run ./telegram_translate.py --debug --overwrite test/messages.html
