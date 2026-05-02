@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 from bs4 import BeautifulSoup
 
-LLAMA_CPP_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
+LLAMA_CPP_DEFAULT_URL = "http://localhost:8100/v1/chat/completions"
 DEFAULT_GLOSSARY_PATH = Path(__file__).with_name("glossary.tsv")
 DEFAULT_SYSTEM_PROMPT = """You are a precise translator for conversation chat history.
 Your goal is to translate messages from Russian to English.
@@ -454,7 +454,7 @@ def parse_args(return_parser: bool = False) -> argparse.Namespace | argparse.Arg
     parser.add_argument("--model", default="Qwen/Qwen2.5-14B-Instruct-GGUF:Q5_K_M", help="Model name (e.g., from llama-server -hf)")
     parser.add_argument("--api-url", default=LLAMA_CPP_DEFAULT_URL, help="llama.cpp v1/chat/completions URL")
     parser.add_argument("--batch-size", type=int, default=48, help="Messages per LLM request")
-    parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=180, help="HTTP timeout in seconds. Bigger timeouts are required for bigger batches.")
     parser.add_argument(
         "--glossary",
         type=Path,
