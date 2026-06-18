@@ -1,7 +1,8 @@
-# Telegram chat export translator with Ollama
+# Telegram chat export translator
 
-This project translates Telegram/Messenger exported HTML files from Russian to English 
-using a local Ollama model while keeping the surrounding HTML structure intact.
+This project translates Telegram chat history exports (HTML format) from Russian to English
+using a local LLM via an OpenAI-compatible API (e.g. `llama.cpp` or `Ollama`),
+while keeping the surrounding HTML structure intact.
 
 It assumes the message content to translate is inside:
 
@@ -17,25 +18,29 @@ or any `div` whose class list includes `text`, such as:
 
 ## What it does
 
-- Recursively reads one HTML file or a whole directory of HTML files.
+- Reads one HTML file or a whole directory of HTML files recursively.
 - Finds all `div.text` blocks.
-- Sends message text to a local Ollama model in batches.
+- Sends message text to a local LLM in batches, including speaker names for context.
 - Rewrites only those text blocks in the output HTML.
 - Skips blocks without Cyrillic by default, which saves time.
+- Transliterates speaker names from Cyrillic to Latin in the output.
 
 ## Requirements
 
 - Python 3.12+
-- Ollama installed and running locally
-- A downloaded model, for example:
+- A running OpenAI-compatible LLM server, e.g. `llama-server` from `llama.cpp`:
 
 ```bash
-ollama pull qwen2.5:14b
+model="Qwen/Qwen2.5-14B-Instruct-GGUF:Q5_K_M"
+
+~/apps/llama.cpp/llama-server \
+    --host 0.0.0.0 \
+    --port 8100 \
+    -hf "$model"
 ```
 
-Ollama exposes a local API on `http://localhost:11434/api/chat`, 
-supports structured outputs via a JSON schema, and supports `keep_alive` 
-so the model can stay loaded between requests.
+The server must expose a `/v1/chat/completions` endpoint with JSON schema support
+(`response_format: { type: "json_object", schema: ... }`).
 
 ## Install
 
@@ -46,13 +51,26 @@ source .venv/bin/activate
 
 ## Basic usage
 
-Translate one file:
+Translate one file (output defaults to `chat.translated.html`):
+
+```bash
+python telegram_translate.py chat.html
+```
+
+Specify an explicit output file:
 
 ```bash
 python telegram_translate.py chat.html translated_chat.html
 ```
 
-Translate a whole directory recursively:
+Translate a whole directory recursively (output defaults to `./export_html.translated/`):
+
+```bash
+python telegram_translate.py ./export_html
+```
+
+Specify an explicit output directory:
+
 ```bash
 python telegram_translate.py ./export_html ./translated_html --overwrite
 ```
@@ -60,10 +78,21 @@ python telegram_translate.py ./export_html ./translated_html --overwrite
 ## Useful options
 
 ```bash
---batch-size 24
+--model Qwen/Qwen2.5-14B-Instruct-GGUF:Q5_K_M
+```
+Model name as reported by the server's `/v1/models` endpoint.
+The script checks that the requested model is available before starting.
+
+```bash
+--api-url http://localhost:8100/v1/chat/completions
+```
+URL of the OpenAI-compatible chat completions endpoint (default shown above).
+
+```bash
+--batch-size 48
 ```
 How many messages are sent in one LLM request.
-Smaller values are safer for weaker local models.
+Smaller values are safer for weaker or slower local models.
 
 ```bash
 --force-all
@@ -76,9 +105,9 @@ Translate **all** `div.text` blocks, even when they do not contain Cyrillic.
 Overwrite output files if they already exist.
 
 ```bash
---keep-alive 10m
+--timeout 180
 ```
-Ask Ollama to keep the model loaded in memory for faster repeated requests.
+HTTP timeout in seconds. Increase this for large batches or slow hardware.
 
 ```bash
 --glossary glossary.tsv
@@ -94,25 +123,28 @@ phrase	translation	comment
 ```
 
 The glossary is added to the LLM system prompt. The model is instructed to use
-the provided translation for matching phrases, while the comment can explain
-which context the translation applies to.
+the provided translation for matching phrases; the comment explains the context.
+
+```bash
+--debug
+```
+Print the full request payload and LLM responses for each batch.
 
 ## Suggested models
 
-For RU → EN chat translation, strong instruction-following models are usually the safest choice locally. 
-In Ollama, a good starting point is something like:
+For RU → EN chat translation, strong instruction-following models work best.
+A good starting point with `llama-server`:
 
-- `qwen2.5:14b`
-- `qwen2.5:7b`
-- `gemma3`
-- `gpt-oss`
+- `Qwen/Qwen2.5-14B-Instruct-GGUF:Q5_K_M`
+- `Qwen/Qwen2.5-7B-Instruct-GGUF:Q5_K_M`
+- `bartowski/gemma-3-12b-it-GGUF:Q5_K_M`
 
 Try a smaller model first if speed matters more than nuance.
 
 ## Notes on quality
 
 Chat translation is tricky because short messages depend heavily on context.
-This script translates **independent message batches**, not the whole conversation statefully. 
+This script translates **independent message batches**, not the whole conversation statefully.
 That is usually good enough, but tiny messages like:
 
 - `угу`
